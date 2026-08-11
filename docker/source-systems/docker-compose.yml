@@ -1,0 +1,25 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: retailpulse-postgres
+
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+
+    ports:
+      - "${POSTGRES_PORT}:5432"
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+    networks:
+      - retailpulse-network
+
+volumes:
+  postgres_data:
+
+networks:
+  retailpulse-network:
+    driver: bridge
