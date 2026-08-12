@@ -1,3 +1,4 @@
 psycopg[binary]
 Faker
 python-dotenv
+mysql-connector-python
