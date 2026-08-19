@@ -1001,58 +1001,168 @@ This was intentional so each transformation could be tested and debugged indepen
 
 ---
 
-## 19. Planned Automation — Not Yet Implemented
+## 19. AWS Glue Workflow Automation — Implemented and Validated
 
-The next step is AWS Glue Workflow/trigger orchestration.
+After all eight standardization jobs were successfully tested manually, orchestration was added using an AWS Glue Workflow.
 
-Planned architecture:
+Workflow:
 
 ```text
-RetailPulse Standardization Workflow
+retailpulse-standardization-workflow
+```
 
-Start trigger
-      ↓
-PostgreSQL jobs
+### Start trigger
+
+```text
+retailpulse-standardization-start
+```
+
+Type:
+
+```text
+On-demand
+```
+
+The start trigger launches all eight standardization jobs:
+
+```text
+PostgreSQL
 - retailpulse-standardize-customers
 - retailpulse-standardize-orders
 - retailpulse-standardize-order-items
 - retailpulse-standardize-payments
 
-MySQL jobs
+MySQL
 - retailpulse-standardize-products
 - retailpulse-standardize-suppliers
 - retailpulse-standardize-stores
 - retailpulse-standardize-inventory
-      ↓
-Wait until required jobs succeed
-      ↓
-Conditional trigger
-      ↓
-retailpulse-standardized-crawler
-      ↓
-Glue Data Catalog updated
-      ↓
-Athena
 ```
 
-Planned names:
+### Conditional success trigger
 
 ```text
-Workflow:
-retailpulse-standardization-workflow
-
-Start trigger:
-retailpulse-standardization-start
-
-Success trigger:
 retailpulse-standardized-crawler-on-success
 ```
 
-This automation is documented as **planned**, not completed.
+Configuration:
+
+```text
+Trigger type: CONDITIONAL
+Trigger state: ACTIVATED
+Trigger logic: Start after ALL watched events
+```
+
+The trigger watches all eight standardization jobs for:
+
+```text
+SUCCEEDED
+```
+
+Only after all eight jobs succeed does it start:
+
+```text
+retailpulse-standardized-crawler
+```
+
+Final automated flow:
+
+```text
+retailpulse-standardization-start
+              ↓
+       8 Glue PySpark jobs
+              ↓
+       ALL 8 SUCCEEDED
+              ↓
+retailpulse-standardized-crawler-on-success
+              ↓
+retailpulse-standardized-crawler
+              ↓
+Glue Data Catalog updated
+              ↓
+Athena
+```
+
+### Successful workflow run
+
+The workflow was executed successfully on August 18, 2026.
+
+Observed run:
+
+```text
+Status:       Completed
+Duration:     03 min 03 sec
+Started:      Aug 18, 2026 23:38:38
+Completed:    Aug 18, 2026 23:41:41
+```
+
+The workflow graph showed successful completion of the start trigger, all eight standardization jobs, the ALL-success conditional trigger, and the standardized crawler.
+
+This confirms that the crawler now runs automatically after the complete standardization batch succeeds.
+
+### Workflow execution rule
+
+When validating this dependency chain, the eight jobs should be started through the workflow/start trigger rather than as unrelated individual manual runs. This keeps the watched job events inside the workflow dependency chain.
 
 ---
 
-## 20. Future Improvements
+## 20. Post-Workflow Data Validation
+
+After the automated workflow completed, Athena was used to verify that the standardized output was actually regenerated.
+
+### Inventory row-count check
+
+```sql
+SELECT
+    COUNT(*) AS inventory_count
+FROM retailpulse_standardized.inventory
+WHERE load_date = '2026-08-14';
+```
+
+Result:
+
+```text
+inventory_count = 500
+```
+
+This confirmed that all expected standardized inventory records remained available after the automated workflow.
+
+### Standardization timestamp check
+
+To prove that the Glue standardization job reprocessed the data, the following query was executed:
+
+```sql
+SELECT
+    MIN(standardized_at) AS earliest_standardized_at,
+    MAX(standardized_at) AS latest_standardized_at,
+    COUNT(*) AS record_count
+FROM retailpulse_standardized.inventory
+WHERE load_date = '2026-08-14';
+```
+
+Result:
+
+```text
+earliest_standardized_at = 2026-08-18 23:40:46.882
+latest_standardized_at   = 2026-08-18 23:40:46.882
+record_count             = 500
+```
+
+Interpretation:
+
+```text
+all 500 rows were processed in the automated batch
+all 500 rows received the new standardized_at timestamp
+standardized Parquet output was regenerated
+the crawler refreshed the Glue Catalog
+Athena successfully read the refreshed standardized data
+```
+
+This validates the workflow at both the orchestration level and the data level.
+
+---
+
+## 21. Future Improvements
 
 The current jobs use full-load overwrite logic:
 
@@ -1069,8 +1179,7 @@ push_down_predicate="load_date='2026-08-14'"
 Next enterprise improvements:
 
 ```text
-Glue Workflows / Triggers
-incremental processing
+dynamic/incremental load_date handling
 job bookmarks or watermarks
 idempotent reruns
 MERGE/upsert patterns
@@ -1085,7 +1194,7 @@ least-privilege IAM hardening
 
 ---
 
-## 21. Key Lessons from Phase 3
+## 22. Key Lessons from Phase 3
 
 1. Glue crawlers discover S3 schemas and register metadata in the Glue Data Catalog.
 2. Athena queries S3 using Catalog metadata.
@@ -1097,12 +1206,15 @@ least-privilege IAM hardening
 8. Spark normally writes `part-....snappy.parquet` files.
 9. `load_date` is the current batch partitioning strategy.
 10. Manual validation before orchestration makes debugging easier.
-11. The inventory business join proved that standardized tables support real analytics.
-12. The replenishment KPI showed 44 of 500 inventory records require reorder action under the current rule.
+11. A Glue Workflow can launch all eight standardization jobs and run the standardized crawler only after every watched job succeeds.
+12. The automated workflow completed successfully in 3 minutes 3 seconds.
+13. The inventory business join proved that standardized tables support real analytics.
+14. The replenishment KPI showed 44 of 500 inventory records require reorder action under the current rule.
+15. `standardized_at` provides a useful batch audit field; the automated rerun refreshed all 500 inventory rows to `2026-08-18 23:40:46.882`.
 
 ---
 
-## 22. Phase 3 Checkpoint
+## 23. Phase 3 Checkpoint
 
 ```text
 Raw S3 landing              COMPLETE
@@ -1114,7 +1226,12 @@ Standardized Parquet        COMPLETE
 Standardized Catalog        COMPLETE
 Athena standardized joins   COMPLETE
 Inventory KPI validation    COMPLETE
-Workflow automation         NEXT
+Glue Workflow automation    COMPLETE
+Conditional trigger         COMPLETE
+Automatic crawler run       COMPLETE
+Post-workflow Athena check  COMPLETE
 ```
 
-**Phase 3 manual standardization checkpoint is successfully complete.**
+**Phase 3 standardization and Glue workflow automation checkpoint is successfully complete.**
+
+**Next engineering step:** replace the hard-coded `load_date='2026-08-14'` processing logic with a dynamic/incremental load strategy.
