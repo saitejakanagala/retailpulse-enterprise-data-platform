@@ -16,3 +16,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Generated local extracts
+/data/extracts/
