@@ -155,9 +155,30 @@ def create_stores(cursor):
 def create_products(cursor, supplier_ids):
     product_ids = []
 
+    # Find the highest product_id already in the database
+    cursor.execute(
+        "SELECT COALESCE(MAX(product_id), %s) FROM products",
+        (PRODUCT_START_ID - 1,)
+    )
+
+    max_product_id = cursor.fetchone()[0]
+
+    # Start new product IDs after the current maximum
+    start_product_id = max_product_id + 1
+
+    # Generate the same number of products as before
+    product_count = PRODUCT_END_ID - PRODUCT_START_ID + 1
+
+    end_product_id = start_product_id + product_count
+
+    print(
+        f"Generating products from "
+        f"{start_product_id} to {end_product_id - 1}"
+    )
+
     for product_id in range(
-        PRODUCT_START_ID,
-        PRODUCT_END_ID + 1,
+        start_product_id,
+        end_product_id,
     ):
         supplier_id = random.choice(supplier_ids)
 

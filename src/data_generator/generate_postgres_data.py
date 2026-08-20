@@ -79,7 +79,7 @@ def create_customer(cursor):
         (
             fake.first_name(),
             fake.last_name(),
-            fake.unique.email(),
+            f"{uuid.uuid4().hex}@example.com",
             fake.phone_number()[:30],
             fake.city(),
             fake.state_abbr(),

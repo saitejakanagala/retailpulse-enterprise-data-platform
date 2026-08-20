@@ -1,4 +1,5 @@
 import os
+import io
 import csv
 from datetime import datetime, timezone
 
@@ -6,7 +7,9 @@ import boto3
 import mysql.connector
 from dotenv import load_dotenv
 
+
 load_dotenv()
+
 
 MYSQL_DATABASE = os.getenv("MYSQL_DATABASE")
 MYSQL_USER = os.getenv("MYSQL_USER")
@@ -23,6 +26,10 @@ TABLES = [
 ]
 
 
+# ---------------------------------------------------------
+# 1. Connect to MySQL
+# ---------------------------------------------------------
+
 def get_connection():
     return mysql.connector.connect(
         host="127.0.0.1",
@@ -33,14 +40,24 @@ def get_connection():
     )
 
 
+# ---------------------------------------------------------
+# 2. Extract table data from MySQL
+# ---------------------------------------------------------
+
 def extract_table(table_name):
     connection = get_connection()
     cursor = connection.cursor()
 
-    cursor.execute(f"SELECT * FROM {table_name};")
+    cursor.execute(
+        f"SELECT * FROM {table_name};"
+    )
 
     rows = cursor.fetchall()
-    columns = [description[0] for description in cursor.description]
+
+    columns = [
+        description[0]
+        for description in cursor.description
+    ]
 
     cursor.close()
     connection.close()
@@ -48,32 +65,48 @@ def extract_table(table_name):
     return columns, rows
 
 
-def write_csv(table_name, columns, rows):
-    os.makedirs("data/extracts/mysql", exist_ok=True)
+# ---------------------------------------------------------
+# 3. Create CSV in memory
+# ---------------------------------------------------------
 
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+def create_csv_in_memory(columns, rows):
 
-    filename = f"{table_name}_{timestamp}.csv"
+    csv_buffer = io.StringIO()
 
-    local_path = os.path.join(
-        "data",
-        "extracts",
-        "mysql",
-        filename,
+    writer = csv.writer(csv_buffer)
+
+    writer.writerow(columns)
+    writer.writerows(rows)
+
+    return csv_buffer.getvalue()
+
+
+# ---------------------------------------------------------
+# 4. Upload directly to S3
+# ---------------------------------------------------------
+
+def upload_to_s3(
+    table_name,
+    csv_content,
+):
+
+    s3 = boto3.client(
+        "s3",
+        region_name="us-east-2",
     )
 
-    with open(local_path, "w", newline="", encoding="utf-8") as csv_file:
-        writer = csv.writer(csv_file)
-        writer.writerow(columns)
-        writer.writerows(rows)
+    load_date = datetime.now(
+        timezone.utc
+    ).strftime("%Y-%m-%d")
 
-    return local_path, filename
+    timestamp = datetime.now(
+        timezone.utc
+    ).strftime("%Y%m%dT%H%M%SZ")
 
-
-def upload_to_s3(table_name, local_path, filename):
-    s3 = boto3.client("s3")
-
-    load_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    filename = (
+        f"{table_name}_"
+        f"{timestamp}.csv"
+    )
 
     s3_key = (
         f"raw/mysql/{table_name}/"
@@ -81,38 +114,54 @@ def upload_to_s3(table_name, local_path, filename):
         f"{filename}"
     )
 
-    s3.upload_file(
-        local_path,
-        S3_BUCKET,
-        s3_key,
+    s3.put_object(
+        Bucket=S3_BUCKET,
+        Key=s3_key,
+        Body=csv_content.encode("utf-8"),
+        ContentType="text/csv",
     )
 
     return s3_key
 
 
+# ---------------------------------------------------------
+# 5. Main ingestion process
+# ---------------------------------------------------------
+
 def main():
+
     for table_name in TABLES:
-        print(f"\nProcessing table: {table_name}")
 
-        columns, rows = extract_table(table_name)
+        print(
+            f"\nProcessing table: {table_name}"
+        )
 
-        print(f"Rows extracted: {len(rows)}")
+        columns, rows = extract_table(
+            table_name
+        )
 
-        local_path, filename = write_csv(
-            table_name,
+        print(
+            f"Rows extracted: {len(rows)}"
+        )
+
+        csv_content = create_csv_in_memory(
             columns,
             rows,
         )
 
-        print(f"CSV created: {local_path}")
+        print(
+            "CSV created in memory"
+        )
 
         s3_key = upload_to_s3(
             table_name,
-            local_path,
-            filename,
+            csv_content,
         )
 
-        print(f"Uploaded to s3://{S3_BUCKET}/{s3_key}")
+        print(
+            f"Uploaded to "
+            f"s3://{S3_BUCKET}/{s3_key}"
+        )
 
 
 if __name__ == "__main__":
