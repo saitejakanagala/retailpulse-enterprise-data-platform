@@ -1,49 +1,57 @@
 # RetailPulse Enterprise Data Platform
-## Phase 3 — AWS Glue Catalog, Athena Validation, and Standardized Parquet Layer
+## Phase 3 — AWS Glue Catalog, Athena Validation, Standardized Parquet Layer, and Workflow Orchestration
 
 **Project:** RetailPulse — Enterprise AWS + Snowflake Data Engineering Platform  
 **Phase:** 3  
 **Region:** `us-east-2` (US East — Ohio)  
-**Status:** Manual standardization completed and validated for all 8 PostgreSQL/MySQL source tables  
-**Date:** 2026-08-18
+**Status:** COMPLETE — multi-batch standardization, dynamic `load_date`, workflow orchestration, historical partition preservation, and Athena validation completed
+**Updated:** 2026-08-20
 
 ---
 
 ## 1. Phase 3 Objective
 
-The goal of Phase 3 was to take the raw source-system extracts already stored in Amazon S3 and build a standardized analytics-ready layer.
+Phase 3 converted raw source extracts in Amazon S3 into a standardized analytics-ready Parquet layer using AWS Glue and Amazon Athena.
 
-The implemented flow is:
+The phase began with manual, single-batch validation and evolved into a reusable multi-batch workflow.
+
+Final implemented flow:
 
 ```text
 PostgreSQL / MySQL source systems
         ↓
-Python ingestion
+Python extraction
+        ↓
+CSV generated in Python memory
+        ↓
+boto3 put_object()
         ↓
 S3 RAW CSV layer
         ↓
-AWS Glue Raw Crawler
+AWS Glue Workflow
+        ↓
+Raw Crawler
         ↓
 Glue Data Catalog — retailpulse_raw
         ↓
-AWS Glue PySpark standardization jobs
+8 AWS Glue PySpark standardization jobs
         ↓
 S3 STANDARDIZED Parquet layer
         ↓
-AWS Glue Standardized Crawler
+Standardized Crawler
         ↓
 Glue Data Catalog — retailpulse_standardized
         ↓
 Amazon Athena validation / business queries
 ```
 
-The standardized layer now contains clean, typed, partitioned Parquet datasets for all eight source tables.
+The standardized layer now contains clean, typed, partitioned Parquet datasets for all eight source tables and preserves multiple `load_date` partitions.
 
 ---
 
-## 2. AWS Region Validation
+## 2. AWS Region and IAM
 
-The project S3 bucket region was verified with AWS CLI:
+Bucket region was verified using:
 
 ```powershell
 aws s3api get-bucket-location --bucket retailpulse-data-lake-saiteja
@@ -55,97 +63,58 @@ Result:
 LocationConstraint: us-east-2
 ```
 
-Therefore, all Glue and Athena resources for this phase were configured in:
-
-```text
-us-east-2
-```
-
----
-
-## 3. IAM Role for AWS Glue
-
-A dedicated AWS Glue service role was created:
+Glue service role:
 
 ```text
 AWSGlueServiceRole-RetailPulse
 ```
 
-### Trust relationship
-
-The role trusts the AWS Glue service:
-
-```json
-{
-  "Effect": "Allow",
-  "Principal": {
-    "Service": "glue.amazonaws.com"
-  },
-  "Action": "sts:AssumeRole"
-}
-```
-
-### Managed policy attached
+Managed policy:
 
 ```text
 AWSGlueServiceRole
 ```
 
-### Custom S3 policy
-
-A custom policy was created:
+Custom S3 policy:
 
 ```text
 RetailPulseGlueS3Access
 ```
 
-Policy:
+Current S3 permissions include:
 
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "VisualEditor0",
-      "Effect": "Allow",
-      "Action": [
-        "s3:PutObject",
-        "s3:GetObject",
-        "s3:ListBucket",
-        "s3:DeleteObject"
-      ],
-      "Resource": [
-        "arn:aws:s3:::retailpulse-data-lake-saiteja/*",
-        "arn:aws:s3:::retailpulse-data-lake-saiteja"
-      ]
-    }
-  ]
-}
+```text
+s3:GetObject
+s3:PutObject
+s3:DeleteObject
+s3:ListBucket
 ```
 
-### Why the role is required
-
-AWS Glue jobs need permission to read raw files, write standardized files, use temporary/script locations, access Catalog metadata, and emit logs/metrics.
-
-A future hardening step is to tighten the custom S3 policy so Glue has read-only access to `raw/` and write/delete access only to the required standardized/temp prefixes.
+Future hardening should scope these permissions to only the required prefixes.
 
 ---
 
-## 4. Raw Glue Data Catalog
+## 3. Raw Glue Data Catalog
 
-A Glue database was created:
+Glue database:
 
 ```text
 retailpulse_raw
 ```
 
-A crawler was configured against:
+Crawler:
+
+```text
+retailpulse-raw-crawler
+```
+
+Raw root:
 
 ```text
 s3://retailpulse-data-lake-saiteja/raw/
 ```
 
-The crawler completed successfully and discovered eight source tables:
+Discovered tables:
 
 ```text
 customers
@@ -158,32 +127,19 @@ stores
 inventory
 ```
 
-Crawler result:
-
-```text
-8 table changes
-9 partition changes
-```
-
-The extra partition is expected because `customers` had two load dates while the other tables initially had one.
+The raw crawler is now part of the Glue Workflow and does not need to be run manually during a normal workflow execution.
 
 ---
 
-## 5. Athena Query Results Location
+## 4. Athena Query Results
 
-Athena query output was configured to:
+Athena result location:
 
 ```text
 s3://retailpulse-data-lake-saiteja/athena-results/
 ```
 
-Athena uses the Glue Data Catalog as table metadata and reads the actual data from S3.
-
----
-
-## 6. Raw-Layer Athena Validation
-
-A cross-source Athena join was successfully executed across data originally sourced from PostgreSQL and MySQL:
+A raw cross-source join was validated across:
 
 ```text
 customers
@@ -195,29 +151,35 @@ order_items
 products
 ```
 
-This validated that raw CSV files were readable from S3, Catalog schemas were correct, cross-source joins worked, logical relationships were valid, and partition pruning could be applied using `load_date`.
+This proved that:
+
+```text
+raw CSV files are readable from S3
+Glue Catalog schemas are usable
+cross-source joins work
+logical product relationships work
+load_date partition filtering works
+```
 
 ---
 
-## 7. Standardized Layer Design
+## 5. Standardized Layer
 
-A second Glue database was created:
+Glue database:
 
 ```text
 retailpulse_standardized
 ```
 
-The standardized S3 design is:
+S3 layout:
 
 ```text
-s3://retailpulse-data-lake-saiteja/standardized/
-
+standardized/
   postgres/
     customers/
     orders/
     order_items/
     payments/
-
   mysql/
     products/
     suppliers/
@@ -225,31 +187,35 @@ s3://retailpulse-data-lake-saiteja/standardized/
     inventory/
 ```
 
-Each table is written as Parquet and partitioned by `load_date`.
+Each table is written as Parquet and partitioned by:
+
+```text
+load_date
+```
 
 Example:
 
 ```text
-standardized/mysql/products/
-    load_date=2026-08-14/
-        part-....snappy.parquet
+standardized/postgres/customers/
+├── load_date=2026-08-14/
+└── load_date=2026-08-20/
 ```
 
-Spark-generated `part-...snappy.parquet` file names were intentionally retained because they are normal for distributed Spark output.
+Spark-generated `part-....snappy.parquet` files were retained because this is normal distributed Spark output.
 
 ---
 
-## 8. Important Standardized Crawler Path Issue and Fix
+## 6. Standardized Crawler Path Issue and Fix
 
 ### Problem
 
-The standardized crawler was initially pointed too high in the hierarchy:
+The standardized crawler was initially pointed to:
 
 ```text
 s3://retailpulse-data-lake-saiteja/standardized/
 ```
 
-Glue interpreted intermediate folders as unnamed partitions and produced metadata such as:
+Glue interpreted intermediate folders as partitions and produced metadata such as:
 
 ```text
 partition_0 = postgres
@@ -257,35 +223,17 @@ partition_1 = customers
 load_date   = 2026-08-14
 ```
 
-It also created an incorrect generalized table such as `standardized`.
+It also created an incorrect generalized table.
 
-### Manual schema-edit attempt
-
-An attempt to remove the bad partition columns directly failed with:
+Attempting to manually remove the incorrect partition columns failed with:
 
 ```text
 PartitionColumns cannot be deleted when indexes are enabled on the table.
 ```
 
-### Correct fix
+### Fix
 
-The incorrect Catalog metadata table was deleted and the crawler source was changed to the real table root:
-
-```text
-s3://retailpulse-data-lake-saiteja/standardized/postgres/customers/
-```
-
-The crawler was run again and produced the clean table:
-
-```text
-retailpulse_standardized.customers
-```
-
-with only `load_date` as the partition column.
-
-### Rule adopted
-
-Use explicit table-root prefixes:
+The incorrect Catalog metadata was deleted and the crawler was changed to explicit table roots:
 
 ```text
 s3://retailpulse-data-lake-saiteja/standardized/postgres/customers/
@@ -299,11 +247,11 @@ s3://retailpulse-data-lake-saiteja/standardized/mysql/stores/
 s3://retailpulse-data-lake-saiteja/standardized/mysql/inventory/
 ```
 
+This produced clean Catalog tables with only `load_date` as the partition column.
+
 ---
 
-## 9. Glue PySpark Job Configuration
-
-Initial jobs used:
+## 7. Glue PySpark Job Configuration
 
 ```text
 Glue version:          5.1
@@ -314,7 +262,7 @@ Number of workers:     2
 Retries:               0
 Max concurrency:       1
 Timeout:               10 minutes
-Job bookmarks:         Disabled for initial full-load testing
+Job bookmarks:         Disabled
 Execution class:       Standard
 IAM role:              AWSGlueServiceRole-RetailPulse
 ```
@@ -342,103 +290,196 @@ Spark UI
 
 ---
 
-## 10. DynamicFrame vs Spark DataFrame
+## 8. DynamicFrame and Spark DataFrame
 
-Glue reads Catalog data into a `DynamicFrame`:
+Glue reads Catalog data into a DynamicFrame.
+
+Example:
 
 ```python
-suppliers_dynamic_frame = (
+customers_dynamic_frame = (
     glueContext.create_dynamic_frame.from_catalog(
         database="retailpulse_raw",
-        table_name="suppliers",
-        push_down_predicate="load_date='2026-08-14'"
+        table_name="customers",
+        push_down_predicate=f"load_date='{load_date}'"
     )
 )
 ```
 
-Conceptually:
-
-```text
-Glue Data Catalog
-      ↓
-retailpulse_raw.suppliers
-      ↓
-AWS Glue DynamicFrame
-```
-
-The DynamicFrame is then converted to a Spark DataFrame:
+The DynamicFrame is converted to a Spark DataFrame:
 
 ```python
-suppliers_df = suppliers_dynamic_frame.toDF()
+customers_df = customers_dynamic_frame.toDF()
 ```
 
-This is done because PySpark transformations such as `filter()`, `dropDuplicates()`, `withColumn()`, `trim()`, `upper()`, `lower()`, `to_timestamp()`, and `to_date()` are naturally performed on Spark DataFrames.
-
-Full flow:
+Flow:
 
 ```text
-S3 files
-  ↓
+S3
+ ↓
 Glue Catalog
-  ↓
+ ↓
 DynamicFrame
-  ↓
+ ↓
 Spark DataFrame
-  ↓
+ ↓
 PySpark transformations
-  ↓
+ ↓
 Parquet
 ```
 
 ---
 
-## 11. Partition Pushdown
+## 9. Dynamic Workflow `load_date`
 
-Current standardization jobs use:
+The initial jobs used a fixed partition:
 
 ```python
 push_down_predicate="load_date='2026-08-14'"
 ```
 
-This causes Glue to read only the required partition instead of scanning all dates.
+This was replaced with a workflow run property.
+
+Workflow property:
+
+```text
+Key:   load_date
+Value: YYYY-MM-DD
+```
+
+Example:
+
+```text
+load_date = 2026-08-20
+```
+
+Each Glue job receives:
+
+```python
+JOB_NAME
+WORKFLOW_NAME
+WORKFLOW_RUN_ID
+```
+
+and reads the workflow property:
+
+```python
+import boto3
+
+args = getResolvedOptions(
+    sys.argv,
+    ['JOB_NAME', 'WORKFLOW_NAME', 'WORKFLOW_RUN_ID']
+)
+
+glue_client = boto3.client("glue")
+
+workflow_properties = glue_client.get_workflow_run_properties(
+    Name=args['WORKFLOW_NAME'],
+    RunId=args['WORKFLOW_RUN_ID']
+)["RunProperties"]
+
+if "load_date" not in workflow_properties:
+    raise Exception("Workflow property 'load_date' is missing")
+
+load_date = workflow_properties["load_date"]
+
+print(f"Processing load_date: {load_date}")
+```
+
+Partition read:
+
+```python
+push_down_predicate=f"load_date='{load_date}'"
+```
 
 Benefits:
 
 ```text
-less S3 scanning
-faster processing
-lower cost
-better scalability
+no hard-coded processing date
+one reusable job definition
+partition pruning
+lower scan volume
+workflow-controlled batch execution
 ```
 
-The fixed date is suitable for the current test and will later be replaced with incremental/watermark-driven processing.
+---
+
+## 10. Parameterization Errors and Fixes
+
+### Missing f-string
+
+Incorrect:
+
+```python
+push_down_predicate="load_date='{load_date}'"
+```
+
+Correct:
+
+```python
+push_down_predicate=f"load_date='{load_date}'"
+```
+
+### Missing GlueContext initialization
+
+Correct initialization:
+
+```python
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
+```
+
+Both issues were corrected before workflow validation.
+
+---
+
+## 11. Empty-Input Protection
+
+All eight jobs were updated to fail when the requested raw partition is empty.
+
+Example:
+
+```python
+inventory_df = inventory_dynamic_frame.toDF()
+
+if inventory_df.rdd.isEmpty():
+    raise Exception(
+        f"No raw inventory data found for load_date={load_date}"
+    )
+```
+
+Equivalent checks were added for:
+
+```text
+customers
+orders
+order_items
+payments
+products
+suppliers
+stores
+inventory
+```
+
+This prevents a missing input partition from being silently treated as a successful run.
 
 ---
 
 ## 12. PostgreSQL Standardization
 
-The standardized PostgreSQL layer contains:
+Completed tables:
 
 ```text
-customers       COMPLETE
-orders          COMPLETE
-order_items     COMPLETE
-payments        COMPLETE
+customers
+orders
+order_items
+payments
 ```
 
 ### Customers
-
-Job:
-
-```text
-retailpulse-standardize-customers
-```
-
-Output:
-
-```text
-s3://retailpulse-data-lake-saiteja/standardized/postgres/customers/
-```
 
 Transformations:
 
@@ -448,16 +489,12 @@ deduplicate by customer_id
 created_at → timestamp
 updated_at → timestamp
 add standardized_at
-write Parquet
 partition by load_date
 ```
 
-#### Error 1 — missing `col`
-
-Initial run failed with:
+Initial error:
 
 ```text
-INVALID_ARGUMENT_ERROR
 NameError: name 'col' is not defined
 ```
 
@@ -467,15 +504,11 @@ Fix:
 from pyspark.sql.functions import col, to_timestamp, current_timestamp
 ```
 
-#### Error 2 — timestamp microseconds
-
-Next run failed because raw values such as:
+Timestamp parsing also initially failed because raw timestamps contained microseconds, such as:
 
 ```text
 2026-08-12 03:32:54.148241
 ```
-
-contained microseconds while an explicit whole-second format was being used.
 
 Fix:
 
@@ -484,17 +517,7 @@ to_timestamp(col("created_at"))
 to_timestamp(col("updated_at"))
 ```
 
-The job then succeeded.
-
 ### Orders
-
-Output:
-
-```text
-s3://retailpulse-data-lake-saiteja/standardized/postgres/orders/
-```
-
-Transformations:
 
 ```text
 order_id not NULL
@@ -511,14 +534,6 @@ partition by load_date
 
 ### Order Items
 
-Output:
-
-```text
-s3://retailpulse-data-lake-saiteja/standardized/postgres/order_items/
-```
-
-Transformations:
-
 ```text
 order_item_id not NULL
 order_id not NULL
@@ -532,14 +547,6 @@ partition by load_date
 ```
 
 ### Payments
-
-Output:
-
-```text
-s3://retailpulse-data-lake-saiteja/standardized/postgres/payments/
-```
-
-Transformations used/planned for the completed standardized table:
 
 ```text
 payment_id not NULL
@@ -559,39 +566,16 @@ partition by load_date
 
 ## 13. MySQL Standardization
 
-All four MySQL jobs were executed manually and validated through Athena.
-
-### 13.1 Products
-
-Job:
+Completed tables:
 
 ```text
-retailpulse-standardize-products
+products
+suppliers
+stores
+inventory
 ```
 
-Output:
-
-```text
-s3://retailpulse-data-lake-saiteja/standardized/mysql/products/
-```
-
-Raw schema:
-
-```text
-product_id           bigint
-supplier_id          bigint
-product_name         string
-category             string
-brand                string
-unit_cost            double
-unit_price           double
-product_status       string
-created_at           string
-updated_at           string
-load_date            string
-```
-
-Transformations:
+### Products
 
 ```text
 product_id not NULL
@@ -611,58 +595,7 @@ add standardized_at
 partition by load_date
 ```
 
-Standardized schema validated in Athena:
-
-```text
-product_id           bigint
-supplier_id          bigint
-product_name         string
-category             string
-brand                string
-unit_cost            decimal(12,2)
-unit_price            decimal(12,2)
-product_status       string
-created_at           timestamp
-updated_at           timestamp
-standardized_at      timestamp
-load_date            string
-```
-
-Status: **COMPLETE**
-
----
-
-### 13.2 Suppliers
-
-Job:
-
-```text
-retailpulse-standardize-suppliers
-```
-
-Output:
-
-```text
-s3://retailpulse-data-lake-saiteja/standardized/mysql/suppliers/
-```
-
-Raw schema:
-
-```text
-supplier_id
-supplier_name
-contact_name
-email
-phone
-city
-state
-country
-created_at
-updated_at
-load_date
-```
-
-Transformations:
+### Suppliers
 
 ```text
 supplier_id not NULL
@@ -680,42 +613,7 @@ add standardized_at
 partition by load_date
 ```
 
-Phone numbers remain in mixed source formats because the current rule only trims the field. More advanced phone normalization is deferred to a later data-quality phase.
-
-Status: **COMPLETE**
-
----
-
-### 13.3 Stores
-
-Job:
-
-```text
-retailpulse-standardize-stores
-```
-
-Output:
-
-```text
-s3://retailpulse-data-lake-saiteja/standardized/mysql/stores/
-```
-
-Raw schema:
-
-```text
-store_id
-store_name
-store_type
-city
-state
-country
-opened_date
-created_at
-updated_at
-load_date
-```
-
-Transformations:
+### Stores
 
 ```text
 store_id not NULL
@@ -732,40 +630,7 @@ add standardized_at
 partition by load_date
 ```
 
-`to_date()` was used for `opened_date` because it represents a calendar date rather than a point in time.
-
-Status: **COMPLETE**
-
----
-
-### 13.4 Inventory
-
-Job:
-
-```text
-retailpulse-standardize-inventory
-```
-
-Output:
-
-```text
-s3://retailpulse-data-lake-saiteja/standardized/mysql/inventory/
-```
-
-Raw schema:
-
-```text
-inventory_id         bigint
-product_id           bigint
-store_id             bigint
-quantity_on_hand     bigint
-reorder_level        bigint
-last_restocked_at    string
-updated_at           string
-load_date            string
-```
-
-Transformations:
+### Inventory
 
 ```text
 inventory_id not NULL
@@ -780,32 +645,16 @@ add standardized_at
 partition by load_date
 ```
 
-Standardized schema validated:
-
-```text
-inventory_id         bigint
-product_id           bigint
-store_id             bigint
-quantity_on_hand     bigint
-reorder_level        bigint
-last_restocked_at    timestamp
-updated_at           timestamp
-standardized_at      timestamp
-load_date            string
-```
-
-Status: **COMPLETE**
-
 ---
 
-## 14. Standardized MySQL Business Join
+## 14. Inventory Business Validation
 
-A business validation query was executed across:
+Standardized join:
 
 ```text
 inventory
-products
-stores
+  -> products
+  -> stores
 ```
 
 Relationships:
@@ -815,46 +664,7 @@ inventory.product_id → products.product_id
 inventory.store_id   → stores.store_id
 ```
 
-Query:
-
-```sql
-SELECT
-    i.inventory_id,
-    p.product_name,
-    s.store_name,
-    i.quantity_on_hand,
-    i.reorder_level,
-    CASE
-        WHEN i.quantity_on_hand <= i.reorder_level
-        THEN 'REORDER'
-        ELSE 'OK'
-    END AS inventory_status
-FROM retailpulse_standardized.inventory i
-JOIN retailpulse_standardized.products p
-    ON i.product_id = p.product_id
-JOIN retailpulse_standardized.stores s
-    ON i.store_id = s.store_id
-WHERE i.load_date = '2026-08-14'
-  AND p.load_date = '2026-08-14'
-  AND s.load_date = '2026-08-14'
-ORDER BY i.quantity_on_hand
-LIMIT 20;
-```
-
-The query successfully returned product names, store names, quantities, reorder levels, and a derived inventory status.
-
-Example:
-
-```text
-Inventory ID:     368
-Product:          Triple-buffered tangible paradigm
-Store:            RetailPulse Cortezview
-Quantity on hand: 0
-Reorder level:    45
-Status:            REORDER
-```
-
-Rule:
+Business rule:
 
 ```text
 quantity_on_hand <= reorder_level
@@ -863,375 +673,741 @@ otherwise
     → OK
 ```
 
----
-
-## 15. Inventory Replenishment KPI Validation
-
-Summary query:
-
-```sql
-SELECT
-    CASE
-        WHEN quantity_on_hand <= reorder_level
-        THEN 'REORDER'
-        ELSE 'OK'
-    END AS inventory_status,
-    COUNT(*) AS record_count
-FROM retailpulse_standardized.inventory
-WHERE load_date = '2026-08-14'
-GROUP BY
-    CASE
-        WHEN quantity_on_hand <= reorder_level
-        THEN 'REORDER'
-        ELSE 'OK'
-    END
-ORDER BY inventory_status;
-```
-
-Result:
+Initial batch result:
 
 ```text
 OK        456
 REORDER    44
-```
-
-Total inventory records:
-
-```text
-500
+Total      500
 ```
 
 Percentages:
 
 ```text
 OK       = 91.2%
-REORDER  =  8.8%
+REORDER  = 8.8%
 ```
-
-Business interpretation:
-
-```text
-456 inventory records currently have stock above the reorder threshold.
-44 inventory records require replenishment based on the current business rule.
-```
-
-This is the first standardized-layer inventory replenishment KPI produced from the MySQL data.
 
 ---
 
-## 16. Completed Standardized Tables
+## 15. Initial Workflow Automation
 
-### PostgreSQL
-
-```text
-customers       COMPLETE
-orders          COMPLETE
-order_items     COMPLETE
-payments        COMPLETE
-```
-
-### MySQL
-
-```text
-products        COMPLETE
-suppliers       COMPLETE
-stores          COMPLETE
-inventory       COMPLETE
-```
-
-Total standardized tables: **8**
-
----
-
-## 17. Current End-to-End Validation Status
-
-```text
-Local PostgreSQL / MySQL
-        ↓
-Python extraction
-        ↓
-CSV
-        ↓
-S3 raw/
-        ↓
-Glue Raw Crawler
-        ↓
-retailpulse_raw
-        ↓
-Glue PySpark jobs
-        ↓
-Parquet
-        ↓
-S3 standardized/
-        ↓
-Standardized Crawler
-        ↓
-retailpulse_standardized
-        ↓
-Athena
-        ↓
-Cross-table business joins
-        ↓
-Inventory replenishment KPI
-```
-
-Status: **PASS**
-
----
-
-## 18. Manual Execution Approach Used
-
-For learning and validation, all standardization jobs were finished manually before orchestration was introduced.
-
-```text
-Create / run Glue job
-        ↓
-Confirm job = SUCCEEDED
-        ↓
-Confirm Parquet output in S3
-        ↓
-Run retailpulse-standardized-crawler manually
-        ↓
-Confirm Glue Catalog table/schema
-        ↓
-Query in Athena
-```
-
-This was intentional so each transformation could be tested and debugged independently.
-
----
-
-## 19. AWS Glue Workflow Automation — Implemented and Validated
-
-After all eight standardization jobs were successfully tested manually, orchestration was added using an AWS Glue Workflow.
-
-Workflow:
+Initial workflow:
 
 ```text
 retailpulse-standardization-workflow
 ```
 
+Original design:
+
+```text
+On-demand start
+      ↓
+8 standardization jobs
+      ↓
+ALL 8 SUCCEEDED
+      ↓
+standardized crawler
+```
+
+Successful run:
+
+```text
+Started:   2026-08-18 23:38:38
+Completed: 2026-08-18 23:41:41
+Duration:  03 min 03 sec
+```
+
+Inventory validation after the run:
+
+```text
+record_count = 500
+```
+
+Audit timestamp:
+
+```text
+2026-08-18 23:40:46.882
+```
+
+This proved that the standardized data was actually reprocessed.
+
+---
+
+## 16. Positive Dynamic-`load_date` Test
+
+Workflow property:
+
+```text
+load_date = 2026-08-14
+```
+
+All eight jobs reprocessed successfully.
+
+Expected counts:
+
+```text
+customers      1000
+orders         1987
+order_items    3988
+payments       1466
+products         50
+suppliers        10
+stores           10
+inventory       500
+```
+
+This validated workflow-driven partition selection across all eight jobs.
+
+---
+
+## 17. Negative Missing-Partition Test
+
+The workflow was intentionally run with:
+
+```text
+load_date = 2026-08-19
+```
+
+No raw data existed for that date.
+
+Because the empty-input checks were active, all eight standardization jobs failed.
+
+Observed result:
+
+```text
+Workflow status:  COMPLETED
+FailedActions:    8
+SucceededActions: 0
+```
+
+Important lesson:
+
+```text
+Workflow status COMPLETED does not mean every action succeeded.
+```
+
+Because the jobs did not all succeed, the final ALL-success trigger was not satisfied and the standardized crawler did not run.
+
+Historical standardized data remained preserved.
+
+CLI troubleshooting lesson:
+
+```powershell
+aws glue get-workflow-runs `
+  --name retailpulse-standardization-workflow `
+  --region us-east-2 `
+  --max-items 5
+```
+
+Use the exact returned `WorkflowRunId` before querying run properties.
+
+---
+
+## 18. Second Source Batch
+
+### PostgreSQL insert run
+
+```text
+Customers inserted : 1000
+Orders inserted    : 1975
+Order items        : 3850
+Payments inserted  : 1476
+```
+
+PostgreSQL totals:
+
+```text
+customers      2000
+orders         3962
+order_items    7838
+payments       2942
+```
+
+### MySQL totals
+
+```text
+suppliers        20
+products        100
+stores            20
+inventory       1000
+```
+
+Product range:
+
+```text
+1001 → 1100
+```
+
+---
+
+## 19. PostgreSQL Generator Rerun Issue
+
+The second PostgreSQL generator run initially failed with:
+
+```text
+psycopg.errors.UniqueViolation:
+duplicate key value violates unique constraint "customers_email_key"
+```
+
+The generator used:
+
+```python
+fake.unique.email()
+```
+
+`fake.unique` only guarantees uniqueness during the current Faker execution and does not know what is already stored in PostgreSQL.
+
+Fix:
+
+```python
+import uuid
+
+f"{uuid.uuid4().hex}@example.com"
+```
+
+This kept the database `UNIQUE(email)` constraint intact while making repeated test-data generation safe.
+
+Syntax validation:
+
+```powershell
+python -m py_compile .\src\data_generator\generate_postgres_data.py
+```
+
+---
+
+## 20. MySQL Generator Rerun Issue
+
+The MySQL generator originally generated fixed product IDs:
+
+```text
+1001–1050
+```
+
+A second run would create duplicate primary keys.
+
+Fix:
+
+```python
+cursor.execute(
+    "SELECT COALESCE(MAX(product_id), %s) FROM products",
+    (PRODUCT_START_ID - 1,)
+)
+
+max_product_id = cursor.fetchone()[0]
+start_product_id = max_product_id + 1
+```
+
+The second batch generated:
+
+```text
+1051–1100
+```
+
+Syntax validation:
+
+```powershell
+python -m py_compile .\src\data_generator\generate_mysql_data.py
+```
+
+---
+
+## 21. Docker Port Issue During Second Batch
+
+The containers temporarily exposed unexpected dynamically assigned host ports:
+
+```text
+MySQL      49680 → 3306
+PostgreSQL 49681 → 5432
+```
+
+The project expected:
+
+```text
+MYSQL_PORT=3307
+POSTGRES_PORT=5433
+```
+
+This caused local connection failures.
+
+Fix: use explicit Compose mappings:
+
+```yaml
+ports:
+  - "${MYSQL_PORT}:3306"
+```
+
+and:
+
+```yaml
+ports:
+  - "${POSTGRES_PORT}:5432"
+```
+
+The stack was restarted without deleting the persistent volumes.
+
+Safety rule:
+
+```text
+Do not use docker compose down -v
+```
+
+unless the database data is intentionally being deleted.
+
+---
+
+## 22. Direct Database-to-S3 Refactor
+
+Old design:
+
+```text
+Database
+   ↓
+Python
+   ↓
+Local CSV
+   ↓
+boto3 upload_file()
+   ↓
+S3
+```
+
+New design:
+
+```text
+PostgreSQL / MySQL
+        ↓
+Python SELECT
+        ↓
+CSV created in memory
+        ↓
+boto3 put_object()
+        ↓
+S3 raw/
+```
+
+Implementation:
+
+```python
+import io
+
+csv_buffer = io.StringIO()
+```
+
+Upload:
+
+```python
+s3.put_object(
+    Bucket=S3_BUCKET,
+    Key=s3_key,
+    Body=csv_content.encode("utf-8"),
+    ContentType="text/csv",
+)
+```
+
+Updated scripts:
+
+```text
+src/ingestion/postgres_to_s3.py
+src/ingestion/mysql_to_s3.py
+```
+
+The normal ingestion path no longer requires `data/extracts/`.
+
+---
+
+## 23. AWS Login Expiration During Ingestion
+
+The first direct MySQL-to-S3 attempt successfully extracted data and created the CSV in memory, but S3 upload failed.
+
+Error:
+
+```text
+AccessDeniedException:
+The refresh token has expired.
+
+LoginRefreshRequired:
+Please reauthenticate using 'aws login'.
+```
+
+Fix:
+
+```powershell
+aws login
+```
+
+Verify:
+
+```powershell
+aws sts get-caller-identity
+```
+
+After reauthentication, the ingestion rerun completed successfully.
+
+---
+
+## 24. Second Raw S3 Batch — 2026-08-20
+
+### MySQL
+
+```text
+suppliers  → 20 rows
+products   → 100 rows
+stores     → 20 rows
+inventory  → 1000 rows
+```
+
+Paths:
+
+```text
+raw/mysql/suppliers/load_date=2026-08-20/
+raw/mysql/products/load_date=2026-08-20/
+raw/mysql/stores/load_date=2026-08-20/
+raw/mysql/inventory/load_date=2026-08-20/
+```
+
+### PostgreSQL
+
+```text
+customers   → 2000 rows
+orders      → 3962 rows
+order_items → 7838 rows
+payments    → 2942 rows
+```
+
+Paths:
+
+```text
+raw/postgres/customers/load_date=2026-08-20/
+raw/postgres/orders/load_date=2026-08-20/
+raw/postgres/order_items/load_date=2026-08-20/
+raw/postgres/payments/load_date=2026-08-20/
+```
+
+All eight raw datasets were written directly from Python memory to S3.
+
+---
+
+## 25. Enhanced Glue Workflow with Raw Crawler
+
+The workflow was rebuilt so the raw crawler executes first.
+
+Final design:
+
+```text
+retailpulse-standardization-start
+              ↓
+retailpulse-raw-crawler
+              ↓
+raw crawler SUCCEEDED
+              ↓
+retailpulse-standardization-jobs-on-raw-success
+              ↓
+8 standardization jobs
+              ↓
+ALL 8 jobs SUCCEEDED
+              ↓
+retailpulse-standardized-crawler-after-jobs
+              ↓
+retailpulse-standardized-crawler
+```
+
 ### Start trigger
 
 ```text
-retailpulse-standardization-start
+Name:   retailpulse-standardization-start
+Type:   ON_DEMAND
+Starts: retailpulse-raw-crawler
 ```
+
+### Raw-crawler success trigger
+
+```text
+Name:
+retailpulse-standardization-jobs-on-raw-success
 
 Type:
+CONDITIONAL / Event
 
-```text
-On-demand
+Logic:
+Start after ALL watched event
+
+Watching:
+retailpulse-raw-crawler - SUCCEEDED
 ```
 
-The start trigger launches all eight standardization jobs:
+Actions:
 
 ```text
-PostgreSQL
-- retailpulse-standardize-customers
-- retailpulse-standardize-orders
-- retailpulse-standardize-order-items
-- retailpulse-standardize-payments
-
-MySQL
-- retailpulse-standardize-products
-- retailpulse-standardize-suppliers
-- retailpulse-standardize-stores
-- retailpulse-standardize-inventory
+8 standardization jobs
 ```
 
-### Conditional success trigger
+### Final success trigger
 
 ```text
-retailpulse-standardized-crawler-on-success
+Name:
+retailpulse-standardized-crawler-after-jobs
+
+Type:
+CONDITIONAL
+
+Logic:
+Start after ALL watched event
 ```
 
-Configuration:
+Watching:
 
 ```text
-Trigger type: CONDITIONAL
-Trigger state: ACTIVATED
-Trigger logic: Start after ALL watched events
+retailpulse-standardize-customers - SUCCEEDED
+retailpulse-standardize-orders - SUCCEEDED
+retailpulse-standardize-order-items - SUCCEEDED
+retailpulse_standardized.payments - SUCCEEDED
+retailpulse-standardize-products - SUCCEEDED
+retailpulse-standardize-suppliers - SUCCEEDED
+retailpulse-standardize-stores - SUCCEEDED
+retailpulse-standardize-inventory - SUCCEEDED
 ```
 
-The trigger watches all eight standardization jobs for:
-
-```text
-SUCCEEDED
-```
-
-Only after all eight jobs succeed does it start:
+Starts:
 
 ```text
 retailpulse-standardized-crawler
 ```
 
-Final automated flow:
+---
 
-```text
-retailpulse-standardization-start
-              ↓
-       8 Glue PySpark jobs
-              ↓
-       ALL 8 SUCCEEDED
-              ↓
-retailpulse-standardized-crawler-on-success
-              ↓
-retailpulse-standardized-crawler
-              ↓
-Glue Data Catalog updated
-              ↓
-Athena
+## 26. Dynamic Partition Overwrite
+
+Old writer:
+
+```python
+(
+    standardized_df
+    .write
+    .mode("overwrite")
+    .partitionBy("load_date")
+    .parquet(output_path)
+)
 ```
 
-### Successful workflow run
+Updated writer:
 
-The workflow was executed successfully on August 18, 2026.
-
-Observed run:
-
-```text
-Status:       Completed
-Duration:     03 min 03 sec
-Started:      Aug 18, 2026 23:38:38
-Completed:    Aug 18, 2026 23:41:41
+```python
+(
+    standardized_df
+    .write
+    .mode("overwrite")
+    .option("partitionOverwriteMode", "dynamic")
+    .partitionBy("load_date")
+    .parquet(output_path)
+)
 ```
 
-The workflow graph showed successful completion of the start trigger, all eight standardization jobs, the ALL-success conditional trigger, and the standardized crawler.
+Purpose:
 
-This confirms that the crawler now runs automatically after the complete standardization batch succeeds.
+```text
+replace only the load_date partition being processed
+preserve historical load_date partitions
+support safe same-date reruns
+```
 
-### Workflow execution rule
+Example:
 
-When validating this dependency chain, the eight jobs should be started through the workflow/start trigger rather than as unrelated individual manual runs. This keeps the watched job events inside the workflow dependency chain.
+```text
+standardized/postgres/customers/
+├── load_date=2026-08-14/   preserved
+└── load_date=2026-08-20/   newly written
+```
 
 ---
 
-## 20. Post-Workflow Data Validation
+## 27. Multi-Batch Athena Validation
 
-After the automated workflow completed, Athena was used to verify that the standardized output was actually regenerated.
+Final Athena validation:
 
-### Inventory row-count check
+| Table | 2026-08-14 | 2026-08-20 |
+|---|---:|---:|
+| customers | 1000 | 2000 |
+| inventory | 500 | 1000 |
+| order_items | 3988 | 7838 |
+| orders | 1987 | 3962 |
+| payments | 1466 | 2942 |
+| products | 50 | 100 |
+| stores | 10 | 20 |
+| suppliers | 10 | 20 |
 
-```sql
-SELECT
-    COUNT(*) AS inventory_count
-FROM retailpulse_standardized.inventory
-WHERE load_date = '2026-08-14';
-```
-
-Result:
-
-```text
-inventory_count = 500
-```
-
-This confirmed that all expected standardized inventory records remained available after the automated workflow.
-
-### Standardization timestamp check
-
-To prove that the Glue standardization job reprocessed the data, the following query was executed:
-
-```sql
-SELECT
-    MIN(standardized_at) AS earliest_standardized_at,
-    MAX(standardized_at) AS latest_standardized_at,
-    COUNT(*) AS record_count
-FROM retailpulse_standardized.inventory
-WHERE load_date = '2026-08-14';
-```
-
-Result:
+This proved:
 
 ```text
-earliest_standardized_at = 2026-08-18 23:40:46.882
-latest_standardized_at   = 2026-08-18 23:40:46.882
-record_count             = 500
+2026-08-14 history preserved
+2026-08-20 partitions created
+all eight tables queryable in Athena
+raw crawler orchestration works
+all eight standardization jobs succeed
+standardized crawler runs after ALL jobs succeed
+dynamic partition overwrite works
 ```
-
-Interpretation:
-
-```text
-all 500 rows were processed in the automated batch
-all 500 rows received the new standardized_at timestamp
-standardized Parquet output was regenerated
-the crawler refreshed the Glue Catalog
-Athena successfully read the refreshed standardized data
-```
-
-This validates the workflow at both the orchestration level and the data level.
 
 ---
 
-## 21. Future Improvements
+## 28. Current Ingestion Semantics
 
-The current jobs use full-load overwrite logic:
+The pipeline now supports multiple `load_date` partitions, but source extraction is still a full snapshot.
 
-```python
-.write.mode("overwrite")
+Example:
+
+```sql
+SELECT *
+FROM retail.customers;
 ```
 
-and a fixed partition:
-
-```python
-push_down_predicate="load_date='2026-08-14'"
-```
-
-Next enterprise improvements:
+Therefore:
 
 ```text
-dynamic/incremental load_date handling
-job bookmarks or watermarks
+2026-08-14 customers = 1000 total rows
+2026-08-20 customers = 2000 total rows
+```
+
+The August 20 partition contains the entire current source state, not only the newly inserted 1000 customers.
+
+This was intentional for multi-batch validation.
+
+---
+
+## 29. Planned Event-Driven Start
+
+The current workflow starts on demand.
+
+Planned enhancement:
+
+```text
+raw batch upload completes
+        ↓
+write _SUCCESS marker
+        ↓
+Amazon EventBridge
+        ↓
+small Lambda
+        ↓
+StartWorkflowRun
+with load_date
+        ↓
+Raw Crawler
+        ↓
+8 Standardization Jobs
+        ↓
+Standardized Crawler
+```
+
+Using one `_SUCCESS` marker is safer than starting a workflow for every S3 object because one source batch contains multiple files.
+
+This is planned, not yet implemented.
+
+---
+
+## 30. Next Phase — True Incremental Ingestion
+
+Current:
+
+```sql
+SELECT *
+FROM source_table;
+```
+
+Target:
+
+```text
+last successful watermark
+        ↓
+read only new / changed records
+        ↓
+S3 incremental batch
+        ↓
+Glue
+        ↓
+later Snowflake MERGE / upsert
+```
+
+Conceptual SQL:
+
+```sql
+SELECT *
+FROM source_table
+WHERE updated_at > :last_successful_watermark;
+```
+
+Next-phase topics:
+
+```text
+watermark persistence
+new/changed-row extraction
+successful-run checkpointing
 idempotent reruns
+late-arriving data
 MERGE/upsert patterns
-late-arriving data handling
-schema evolution
-data-quality rules
-quarantine/reprocessing
 record-count reconciliation
-CloudWatch alarms / SNS notifications
-least-privilege IAM hardening
+failure recovery
 ```
 
 ---
 
-## 22. Key Lessons from Phase 3
+## 31. Key Lessons
 
-1. Glue crawlers discover S3 schemas and register metadata in the Glue Data Catalog.
-2. Athena queries S3 using Catalog metadata.
-3. Glue DynamicFrames are ETL-friendly Glue structures; Spark DataFrames are used for PySpark transformations.
-4. `push_down_predicate` reads only the required partition.
-5. Timestamp parsing should not use an overly restrictive format when microseconds may be present.
-6. PySpark functions such as `col()` must be imported explicitly.
-7. Standardized crawler paths should point to table roots, not overly broad prefixes.
-8. Spark normally writes `part-....snappy.parquet` files.
-9. `load_date` is the current batch partitioning strategy.
-10. Manual validation before orchestration makes debugging easier.
-11. A Glue Workflow can launch all eight standardization jobs and run the standardized crawler only after every watched job succeeds.
-12. The automated workflow completed successfully in 3 minutes 3 seconds.
-13. The inventory business join proved that standardized tables support real analytics.
-14. The replenishment KPI showed 44 of 500 inventory records require reorder action under the current rule.
-15. `standardized_at` provides a useful batch audit field; the automated rerun refreshed all 500 inventory rows to `2026-08-18 23:40:46.882`.
+1. Glue Crawlers register S3 schema and partition metadata.
+2. Athena queries S3 through Glue Catalog metadata.
+3. DynamicFrames are Glue-aware structures; Spark DataFrames are used for transformations.
+4. `push_down_predicate` limits processing to the selected partition.
+5. Workflow run properties remove hard-coded batch dates.
+6. A missing f-string can cause a literal `{load_date}` partition predicate.
+7. Jobs requiring `WORKFLOW_NAME` and `WORKFLOW_RUN_ID` should normally run through the workflow.
+8. Empty-input checks make missing partitions fail clearly.
+9. Glue workflow `COMPLETED` does not mean all actions succeeded.
+10. Raw and standardized crawlers can be orchestrated in the same workflow.
+11. ALL-success triggers prevent downstream catalog refresh after partial failure.
+12. Standardized crawler paths should point to actual table roots.
+13. Dynamic partition overwrite preserves historical partitions.
+14. `standardized_at` is useful for batch auditing.
+15. In-memory S3 upload removes unnecessary local file dependencies.
+16. AWS CLI login credentials can expire and require `aws login`.
+17. Synthetic generators must be rerunnable across batches.
+18. The two-batch Athena test proves historical and current partitions can coexist.
+19. The current solution is multi-batch but still full-snapshot.
+20. Watermark-based extraction is the next architectural step.
 
 ---
 
-## 23. Phase 3 Checkpoint
+## 32. Phase 3 Completion Checkpoint
 
 ```text
-Raw S3 landing              COMPLETE
-Raw Glue Catalog            COMPLETE
-Athena raw validation       COMPLETE
-PostgreSQL standardization  COMPLETE
-MySQL standardization       COMPLETE
-Standardized Parquet        COMPLETE
-Standardized Catalog        COMPLETE
-Athena standardized joins   COMPLETE
-Inventory KPI validation    COMPLETE
-Glue Workflow automation    COMPLETE
-Conditional trigger         COMPLETE
-Automatic crawler run       COMPLETE
-Post-workflow Athena check  COMPLETE
+Raw S3 landing                              COMPLETE
+Raw Glue Catalog                            COMPLETE
+Athena raw validation                       COMPLETE
+PostgreSQL standardization                  COMPLETE
+MySQL standardization                       COMPLETE
+Standardized Parquet                        COMPLETE
+Standardized Catalog                        COMPLETE
+Athena standardized joins                   COMPLETE
+Inventory KPI validation                    COMPLETE
+Glue Workflow                               COMPLETE
+Dynamic workflow load_date                  COMPLETE
+Empty-input protection                      COMPLETE
+Positive workflow test                      COMPLETE
+Negative missing-partition test             COMPLETE
+Second source batch                         COMPLETE
+Rerunnable PostgreSQL generator              COMPLETE
+Rerunnable MySQL product generation          COMPLETE
+Direct database-to-S3 ingestion             COMPLETE
+Raw crawler workflow integration            COMPLETE
+Dynamic partition overwrite                 COMPLETE
+Historical partition preservation           COMPLETE
+Second-batch standardized processing         COMPLETE
+Two-batch Athena validation                  COMPLETE
+EventBridge automatic workflow start         PLANNED
+True watermark incremental ingestion         NEXT
 ```
 
-**Phase 3 standardization and Glue workflow automation checkpoint is successfully complete.**
+**Phase 3 is successfully complete.**
 
-**Next engineering step:** replace the hard-coded `load_date='2026-08-14'` processing logic with a dynamic/incremental load strategy.
+The platform can now process a selected `load_date` through one Glue Workflow, automatically refresh the raw Catalog, execute all eight standardization jobs, preserve historical standardized partitions, refresh the standardized Catalog, and validate results through Athena.
+
+**Next engineering phase:** implement true watermark-based incremental ingestion on a new feature branch.
