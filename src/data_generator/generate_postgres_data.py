@@ -8,7 +8,10 @@ from dotenv import load_dotenv
 from faker import Faker
 
 
-# Load values from .env
+# ---------------------------------------------------------
+# Environment
+# ---------------------------------------------------------
+
 load_dotenv()
 
 DB_HOST = "127.0.0.1"
@@ -18,14 +21,22 @@ DB_USER = os.getenv("POSTGRES_USER")
 DB_PASSWORD = os.getenv("POSTGRES_PASSWORD")
 
 
-# Small test batch first
-CUSTOMER_COUNT = 1000
+# ---------------------------------------------------------
+# Automated 12-hour batch configuration
+# ---------------------------------------------------------
 
-MIN_ORDERS_PER_CUSTOMER = 1
-MAX_ORDERS_PER_CUSTOMER = 3
+NEW_CUSTOMER_COUNT = 100
+
+MIN_ORDERS_PER_CUSTOMER = 3
+MAX_ORDERS_PER_CUSTOMER = 6
 
 MIN_ITEMS_PER_ORDER = 1
 MAX_ITEMS_PER_ORDER = 3
+
+CUSTOMER_UPDATE_COUNT = 15
+ORDER_UPDATE_COUNT = 40
+ORDER_ITEM_UPDATE_COUNT = 30
+PAYMENT_UPDATE_COUNT = 25
 
 
 ORDER_STATUSES = [
@@ -47,9 +58,18 @@ PAYMENT_METHODS = [
     "APPLE_PAY",
 ]
 
+PAYMENT_STATUSES = [
+    "SUCCESS",
+    "FAILED",
+]
+
 
 fake = Faker()
 
+
+# ---------------------------------------------------------
+# Database connection
+# ---------------------------------------------------------
 
 def get_connection():
     return psycopg.connect(
@@ -60,6 +80,10 @@ def get_connection():
         password=DB_PASSWORD,
     )
 
+
+# ---------------------------------------------------------
+# INSERT logic
+# ---------------------------------------------------------
 
 def create_customer(cursor):
     cursor.execute(
@@ -113,20 +137,18 @@ def create_order(cursor, customer_id):
         ),
     )
 
-    order_id = cursor.fetchone()[0]
-
-    return order_id, order_status
+    return cursor.fetchone()[0], order_status
 
 
 def create_order_items(cursor, order_id):
-    item_count = random.randint(
+    generated_count = random.randint(
         MIN_ITEMS_PER_ORDER,
         MAX_ITEMS_PER_ORDER,
     )
 
     order_total = Decimal("0.00")
 
-    for _ in range(item_count):
+    for _ in range(generated_count):
         product_id = random.randint(1001, 1050)
         quantity = random.randint(1, 4)
 
@@ -157,9 +179,7 @@ def create_order_items(cursor, order_id):
     cursor.execute(
         """
         UPDATE retail.orders
-        SET
-            order_total = %s,
-            updated_at = CURRENT_TIMESTAMP
+        SET order_total = %s
         WHERE order_id = %s;
         """,
         (
@@ -168,7 +188,7 @@ def create_order_items(cursor, order_id):
         ),
     )
 
-    return order_total, item_count
+    return order_total, generated_count
 
 
 def create_payment(
@@ -183,9 +203,7 @@ def create_payment(
     payment_method = random.choice(PAYMENT_METHODS)
 
     if order_status == "PENDING":
-        payment_status = random.choice(
-            ["SUCCESS", "FAILED"]
-        )
+        payment_status = random.choice(PAYMENT_STATUSES)
     else:
         payment_status = "SUCCESS"
 
@@ -216,6 +234,135 @@ def create_payment(
     return True
 
 
+# ---------------------------------------------------------
+# UPDATE logic
+# ---------------------------------------------------------
+
+def update_existing_customers(cursor):
+    cursor.execute(
+        """
+        SELECT customer_id
+        FROM retail.customers
+        ORDER BY RANDOM()
+        LIMIT %s;
+        """,
+        (CUSTOMER_UPDATE_COUNT,),
+    )
+
+    customer_ids = [row[0] for row in cursor.fetchall()]
+
+    for customer_id in customer_ids:
+        cursor.execute(
+            """
+            UPDATE retail.customers
+            SET
+                phone = %s,
+                city = %s,
+                state = %s
+            WHERE customer_id = %s;
+            """,
+            (
+                fake.phone_number()[:30],
+                fake.city(),
+                fake.state_abbr(),
+                customer_id,
+            ),
+        )
+
+    return len(customer_ids)
+
+
+def update_existing_orders(cursor):
+    cursor.execute(
+        """
+        SELECT order_id
+        FROM retail.orders
+        ORDER BY RANDOM()
+        LIMIT %s;
+        """,
+        (ORDER_UPDATE_COUNT,),
+    )
+
+    order_ids = [row[0] for row in cursor.fetchall()]
+
+    for order_id in order_ids:
+        cursor.execute(
+            """
+            UPDATE retail.orders
+            SET order_status = %s
+            WHERE order_id = %s;
+            """,
+            (
+                random.choice(ORDER_STATUSES),
+                order_id,
+            ),
+        )
+
+    return len(order_ids)
+
+
+def update_existing_order_items(cursor):
+    cursor.execute(
+        """
+        SELECT order_item_id
+        FROM retail.order_items
+        ORDER BY RANDOM()
+        LIMIT %s;
+        """,
+        (ORDER_ITEM_UPDATE_COUNT,),
+    )
+
+    order_item_ids = [row[0] for row in cursor.fetchall()]
+
+    for order_item_id in order_item_ids:
+        cursor.execute(
+            """
+            UPDATE retail.order_items
+            SET quantity = %s
+            WHERE order_item_id = %s;
+            """,
+            (
+                random.randint(1, 4),
+                order_item_id,
+            ),
+        )
+
+    return len(order_item_ids)
+
+
+def update_existing_payments(cursor):
+    cursor.execute(
+        """
+        SELECT payment_id
+        FROM retail.payments
+        ORDER BY RANDOM()
+        LIMIT %s;
+        """,
+        (PAYMENT_UPDATE_COUNT,),
+    )
+
+    payment_ids = [row[0] for row in cursor.fetchall()]
+
+    for payment_id in payment_ids:
+        cursor.execute(
+            """
+            UPDATE retail.payments
+            SET payment_status = %s
+            WHERE payment_id = %s;
+            """,
+            (
+                random.choice(PAYMENT_STATUSES),
+                payment_id,
+            ),
+        )
+
+    return len(payment_ids)
+
+
+# ---------------------------------------------------------
+# Main batch generator
+# ---------------------------------------------------------
+
 def generate_data():
     customer_count = 0
     order_count = 0
@@ -225,7 +372,11 @@ def generate_data():
     with get_connection() as connection:
         with connection.cursor() as cursor:
 
-            for _ in range(CUSTOMER_COUNT):
+            # ---------------------------------------------
+            # Generate new transactional data
+            # ---------------------------------------------
+
+            for _ in range(NEW_CUSTOMER_COUNT):
                 customer_id = create_customer(cursor)
                 customer_count += 1
 
@@ -242,9 +393,11 @@ def generate_data():
 
                     order_count += 1
 
-                    order_total, generated_items = create_order_items(
-                        cursor,
-                        order_id,
+                    order_total, generated_items = (
+                        create_order_items(
+                            cursor,
+                            order_id,
+                        )
                     )
 
                     item_count += generated_items
@@ -259,15 +412,32 @@ def generate_data():
                     if payment_created:
                         payment_count += 1
 
+            # ---------------------------------------------
+            # Generate realistic source updates
+            # ---------------------------------------------
+
+            customer_updates = update_existing_customers(cursor)
+            order_updates = update_existing_orders(cursor)
+            order_item_updates = update_existing_order_items(cursor)
+            payment_updates = update_existing_payments(cursor)
+
         connection.commit()
 
     print()
-    print("RetailPulse PostgreSQL data generation completed.")
-    print("---------------------------------------------")
+    print("RetailPulse PostgreSQL automated batch completed.")
+    print("------------------------------------------------")
+    print()
+    print("NEW RECORDS")
     print(f"Customers inserted : {customer_count}")
     print(f"Orders inserted    : {order_count}")
     print(f"Order items        : {item_count}")
     print(f"Payments inserted  : {payment_count}")
+    print()
+    print("UPDATED RECORDS")
+    print(f"Customers updated  : {customer_updates}")
+    print(f"Orders updated     : {order_updates}")
+    print(f"Order items updated: {order_item_updates}")
+    print(f"Payments updated   : {payment_updates}")
 
 
 if __name__ == "__main__":

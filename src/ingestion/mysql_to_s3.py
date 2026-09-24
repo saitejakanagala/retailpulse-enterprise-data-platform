@@ -1,78 +1,53 @@
-import os
-import io
 import csv
+import io
+import os
 from datetime import datetime, timezone
 
 import boto3
-import psycopg
+import mysql.connector
 from dotenv import load_dotenv
 
 
+# ---------------------------------------------------------
+# Environment
+# ---------------------------------------------------------
+
 load_dotenv()
 
-
-# ---------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------
-
-POSTGRES_DB = os.getenv("POSTGRES_DB")
-POSTGRES_USER = os.getenv("POSTGRES_USER")
-POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD")
-POSTGRES_PORT = os.getenv("POSTGRES_PORT")
-
-AWS_REGION = os.getenv(
-    "AWS_REGION",
-    "us-east-2",
-)
-
-S3_BUCKET = os.getenv(
-    "S3_BUCKET",
-    "retailpulse-data-lake-saiteja",
-)
-
-WATERMARK_TABLE = os.getenv(
-    "WATERMARK_TABLE",
-    "retailpulse-watermarks",
-)
-
-
-TABLES = [
-    "customers",
-    "orders",
-    "order_items",
-    "payments",
-]
+MYSQL_HOST = "127.0.0.1"
+MYSQL_PORT = int(os.getenv("MYSQL_PORT", "3307"))
+MYSQL_DATABASE = os.getenv("MYSQL_DATABASE")
+MYSQL_USER = os.getenv("MYSQL_USER")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD")
 
 
 # ---------------------------------------------------------
-# Composite watermark configuration
-# ---------------------------------------------------------
-#
-# Every PostgreSQL table uses:
-#
-#     updated_at + primary-key ID
-#
-# updated_at detects INSERTs and UPDATEs.
-# The primary-key ID acts as a tie-breaker when multiple
-# rows have the same updated_at timestamp.
+# AWS configuration
 # ---------------------------------------------------------
 
-WATERMARK_COLUMNS = {
-    "customers": {
-        "updated_at": "updated_at",
-        "id": "customer_id",
+AWS_REGION = "us-east-2"
+
+S3_BUCKET = "retailpulse-data-lake-saiteja"
+
+WATERMARK_TABLE = "retailpulse-watermarks"
+
+
+# ---------------------------------------------------------
+# MySQL table configuration
+# ---------------------------------------------------------
+
+TABLE_CONFIG = {
+    "suppliers": {
+        "primary_key": "supplier_id",
     },
-    "orders": {
-        "updated_at": "updated_at",
-        "id": "order_id",
+    "products": {
+        "primary_key": "product_id",
     },
-    "order_items": {
-        "updated_at": "updated_at",
-        "id": "order_item_id",
+    "stores": {
+        "primary_key": "store_id",
     },
-    "payments": {
-        "updated_at": "updated_at",
-        "id": "payment_id",
+    "inventory": {
+        "primary_key": "inventory_id",
     },
 }
 
@@ -81,24 +56,47 @@ WATERMARK_COLUMNS = {
 # AWS clients
 # ---------------------------------------------------------
 
-dynamodb = boto3.client(
-    "dynamodb",
-    region_name=AWS_REGION,
-)
-
 s3 = boto3.client(
     "s3",
     region_name=AWS_REGION,
 )
 
+dynamodb = boto3.client(
+    "dynamodb",
+    region_name=AWS_REGION,
+)
+
 
 # ---------------------------------------------------------
-# 1. Read composite watermark from DynamoDB
+# MySQL connection
+# ---------------------------------------------------------
+
+def get_mysql_connection():
+    return mysql.connector.connect(
+        host=MYSQL_HOST,
+        port=MYSQL_PORT,
+        database=MYSQL_DATABASE,
+        user=MYSQL_USER,
+        password=MYSQL_PASSWORD,
+    )
+
+
+# ---------------------------------------------------------
+# DynamoDB watermark key
+# ---------------------------------------------------------
+
+def get_watermark_key(table_name):
+    return f"mysql#{table_name}"
+
+
+# ---------------------------------------------------------
+# Read watermark
 # ---------------------------------------------------------
 
 def get_watermark(table_name):
-
-    source_table = f"postgres#{table_name}"
+    source_table = get_watermark_key(
+        table_name
+    )
 
     response = dynamodb.get_item(
         TableName=WATERMARK_TABLE,
@@ -114,123 +112,44 @@ def get_watermark(table_name):
 
     if not item:
         raise RuntimeError(
-            f"No watermark found for {source_table}"
+            f"No watermark found for "
+            f"{source_table}. "
+            f"Incremental ingestion stopped "
+            f"to prevent accidental full load."
         )
 
-    if "last_id" not in item:
+    if (
+        "last_updated_at" not in item
+        or "last_id" not in item
+    ):
         raise RuntimeError(
-            f"last_id is missing for {source_table}"
+            f"Watermark for {source_table} "
+            f"is incomplete."
         )
 
-    if "last_updated_at" not in item:
-        raise RuntimeError(
-            f"last_updated_at is missing for {source_table}"
-        )
+    last_updated_at = (
+        item["last_updated_at"]["S"]
+    )
 
     last_id = int(
         item["last_id"]["N"]
     )
 
-    last_updated_at_string = item[
-        "last_updated_at"
-    ]["S"]
-
-    # DynamoDB stores the timestamp as a String.
-    # PostgreSQL uses TIMESTAMP WITHOUT TIME ZONE,
-    # so convert the string back into a Python datetime.
-    try:
-        last_updated_at = datetime.strptime(
-            last_updated_at_string,
-            "%Y-%m-%d %H:%M:%S.%f",
-        )
-
-    except ValueError:
-        last_updated_at = datetime.strptime(
-            last_updated_at_string,
-            "%Y-%m-%d %H:%M:%S",
-        )
-
     return last_updated_at, last_id
 
 
 # ---------------------------------------------------------
-# 2. Determine new composite watermark
-# ---------------------------------------------------------
-
-def get_new_watermark(
-    table_name,
-    columns,
-    rows,
-):
-
-    if not rows:
-        return None
-
-    watermark_config = WATERMARK_COLUMNS[
-        table_name
-    ]
-
-    updated_at_column = watermark_config[
-        "updated_at"
-    ]
-
-    id_column = watermark_config[
-        "id"
-    ]
-
-    updated_at_index = columns.index(
-        updated_at_column
-    )
-
-    id_index = columns.index(
-        id_column
-    )
-
-    # SQL results are ordered by:
-    #
-    #     updated_at, primary-key ID
-    #
-    # Therefore the final row contains the
-    # newest composite watermark.
-    last_row = rows[-1]
-
-    new_updated_at = last_row[
-        updated_at_index
-    ]
-
-    new_id = last_row[
-        id_index
-    ]
-
-    return new_updated_at, new_id
-
-
-# ---------------------------------------------------------
-# 3. Update composite watermark in DynamoDB
+# Update watermark
 # ---------------------------------------------------------
 
 def update_watermark(
     table_name,
-    new_updated_at,
-    new_id,
+    last_updated_at,
+    last_id,
 ):
-
-    source_table = f"postgres#{table_name}"
-
-    if isinstance(
-        new_updated_at,
-        datetime,
-    ):
-        updated_at_string = (
-            new_updated_at.strftime(
-                "%Y-%m-%d %H:%M:%S.%f"
-            )
-        )
-
-    else:
-        updated_at_string = str(
-            new_updated_at
-        )
+    source_table = get_watermark_key(
+        table_name
+    )
 
     dynamodb.update_item(
         TableName=WATERMARK_TABLE,
@@ -240,107 +159,71 @@ def update_watermark(
             }
         },
         UpdateExpression=(
-            "SET last_id = :last_id, "
-            "last_updated_at = :last_updated_at"
+            "SET last_updated_at = :ts, "
+            "last_id = :id"
         ),
         ExpressionAttributeValues={
-            ":last_id": {
-                "N": str(new_id)
+            ":ts": {
+                "S": last_updated_at
             },
-            ":last_updated_at": {
-                "S": updated_at_string
+            ":id": {
+                "N": str(last_id)
             },
         },
     )
 
     print(
-        f"Watermark updated for {table_name}: "
-        f"updated_at={updated_at_string}, "
-        f"id={new_id}"
-    )
-
-
-# ---------------------------------------------------------
-# 4. Connect to PostgreSQL
-# ---------------------------------------------------------
-
-def get_connection():
-
-    return psycopg.connect(
-        host="127.0.0.1",
-        port=POSTGRES_PORT,
-        dbname=POSTGRES_DB,
-        user=POSTGRES_USER,
-        password=POSTGRES_PASSWORD,
-    )
-
-
-# ---------------------------------------------------------
-# 5. Extract incremental table data
-# ---------------------------------------------------------
-
-def extract_table(table_name):
-
-    if table_name not in WATERMARK_COLUMNS:
-        raise ValueError(
-            f"No watermark configuration "
-            f"for table: {table_name}"
-        )
-
-    watermark_config = WATERMARK_COLUMNS[
-        table_name
-    ]
-
-    updated_at_column = watermark_config[
-        "updated_at"
-    ]
-
-    id_column = watermark_config[
-        "id"
-    ]
-
-    last_updated_at, last_id = (
-        get_watermark(
-            table_name
-        )
-    )
-
-    print(
-        f"Current watermark for {table_name}: "
+        f"Watermark updated for "
+        f"{table_name}: "
         f"updated_at={last_updated_at}, "
         f"id={last_id}"
     )
 
-    connection = get_connection()
-    cursor = connection.cursor()
 
-    # -----------------------------------------------------
-    # Composite watermark query
-    #
-    # Example:
-    #
-    # WHERE updated_at > previous_timestamp
-    #
-    # OR
-    #
-    # updated_at = previous_timestamp
-    # AND customer_id > previous_id
-    #
-    # The ID handles rows sharing the same timestamp.
-    # -----------------------------------------------------
+# ---------------------------------------------------------
+# Extract incremental rows
+# ---------------------------------------------------------
 
-    query = f"""
-        SELECT *
-        FROM retail.{table_name}
-        WHERE {updated_at_column} > %s
-           OR (
-               {updated_at_column} = %s
-               AND {id_column} > %s
-           )
-        ORDER BY {updated_at_column}, {id_column};
-    """
+def extract_table(table_name):
+    primary_key = (
+        TABLE_CONFIG[table_name][
+            "primary_key"
+        ]
+    )
+
+    (
+        last_updated_at,
+        last_id,
+    ) = get_watermark(
+        table_name
+    )
+
+    print(
+        f"Current watermark for "
+        f"{table_name}: "
+        f"updated_at={last_updated_at}, "
+        f"id={last_id}"
+    )
+
+    connection = get_mysql_connection()
 
     try:
+        cursor = connection.cursor()
+
+        query = f"""
+            SELECT *
+            FROM {table_name}
+            WHERE
+                updated_at > %s
+                OR (
+                    updated_at = %s
+                    AND {primary_key} > %s
+                )
+            ORDER BY
+                updated_at ASC,
+                {primary_key} ASC;
+        """
+
         cursor.execute(
             query,
             (
@@ -353,76 +236,135 @@ def extract_table(table_name):
         rows = cursor.fetchall()
 
         columns = [
-            description.name
+            description[0]
             for description
             in cursor.description
         ]
+
+        print(
+            f"Rows extracted: "
+            f"{len(rows)}"
+        )
+
+        if not rows:
+            return (
+                columns,
+                [],
+                None,
+                None,
+            )
+
+        updated_at_index = (
+            columns.index("updated_at")
+        )
+
+        primary_key_index = (
+            columns.index(primary_key)
+        )
+
+        last_row = rows[-1]
+
+        new_updated_at = (
+            last_row[
+                updated_at_index
+            ]
+        )
+
+        new_id = int(
+            last_row[
+                primary_key_index
+            ]
+        )
+
+        if isinstance(
+            new_updated_at,
+            datetime,
+        ):
+            new_updated_at = (
+                new_updated_at.strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+            )
+        else:
+            new_updated_at = str(
+                new_updated_at
+            )
+
+        print(
+            f"New watermark candidate: "
+            f"updated_at="
+            f"{new_updated_at}, "
+            f"id={new_id}"
+        )
+
+        return (
+            columns,
+            rows,
+            new_updated_at,
+            new_id,
+        )
 
     finally:
         cursor.close()
         connection.close()
 
-    return columns, rows
-
 
 # ---------------------------------------------------------
-# 6. Create CSV in memory
+# Convert rows to CSV
 # ---------------------------------------------------------
 
-def create_csv_in_memory(
+def create_csv(
     columns,
     rows,
 ):
-
     csv_buffer = io.StringIO()
 
     writer = csv.writer(
         csv_buffer
     )
 
-    # Write CSV header.
     writer.writerow(
         columns
     )
 
-    # Write extracted PostgreSQL rows.
     writer.writerows(
         rows
+    )
+
+    print(
+        "CSV created in memory"
     )
 
     return csv_buffer.getvalue()
 
 
 # ---------------------------------------------------------
-# 7. Upload incremental batch directly to S3
+# Upload CSV to S3
 # ---------------------------------------------------------
 
 def upload_to_s3(
     table_name,
     csv_content,
+    load_date,
 ):
-
-    current_time = datetime.now(
+    now_utc = datetime.now(
         timezone.utc
     )
 
-    load_date = current_time.strftime(
-        "%Y-%m-%d"
-    )
-
-    timestamp = current_time.strftime(
+    timestamp = now_utc.strftime(
         "%Y%m%dT%H%M%SZ"
     )
 
-    filename = (
+    file_name = (
         f"{table_name}_"
         f"{timestamp}.csv"
     )
 
     s3_key = (
-        f"raw/postgres/{table_name}/"
+        f"raw/mysql/"
+        f"{table_name}/"
         f"load_date={load_date}/"
-        f"{filename}"
+        f"{file_name}"
     )
 
     s3.put_object(
@@ -434,107 +376,99 @@ def upload_to_s3(
         ContentType="text/csv",
     )
 
+    print(
+        f"Uploaded to "
+        f"s3://{S3_BUCKET}/"
+        f"{s3_key}"
+    )
+
     return s3_key
 
 
 # ---------------------------------------------------------
-# 8. Main incremental ingestion process
+# Main ingestion
 # ---------------------------------------------------------
 
 def main():
+    load_date = datetime.now(
+        timezone.utc
+    ).strftime(
+        "%Y-%m-%d"
+    )
 
-    for table_name in TABLES:
+    print()
+    print(
+        "RetailPulse MySQL "
+        "incremental ingestion"
+    )
+    print(
+        "================================"
+    )
 
+    for table_name in TABLE_CONFIG:
+
+        print()
         print(
-            "\n"
+            "----------------------------------------"
+        )
+        print(
+            f"Processing table: "
+            f"{table_name}"
+        )
+        print(
             "----------------------------------------"
         )
 
-        print(
-            f"Processing table: {table_name}"
-        )
-
-        print(
-            "----------------------------------------"
-        )
-
-        # Read only rows newer than the current
-        # DynamoDB composite watermark.
-        columns, rows = extract_table(
+        (
+            columns,
+            rows,
+            new_updated_at,
+            new_id,
+        ) = extract_table(
             table_name
         )
 
-        print(
-            f"Rows extracted: {len(rows)}"
-        )
-
-        # Do not create empty S3 files.
         if not rows:
-
             print(
-                f"No new or updated rows for "
-                f"{table_name}. "
+                f"No new or updated rows "
+                f"for {table_name}. "
                 f"Skipping S3 upload."
             )
 
             continue
 
-        # Find the newest:
-        #
-        #     (updated_at, primary-key ID)
-        #
-        # contained in this extracted batch.
-        new_watermark = get_new_watermark(
-            table_name,
+        csv_content = create_csv(
             columns,
             rows,
         )
 
-        new_updated_at, new_id = (
-            new_watermark
-        )
-
-        print(
-            f"New watermark candidate: "
-            f"updated_at={new_updated_at}, "
-            f"id={new_id}"
-        )
-
-        # Create the incremental CSV completely
-        # in memory.
-        csv_content = create_csv_in_memory(
-            columns,
-            rows,
-        )
-
-        print(
-            "CSV created in memory"
-        )
-
-        # Upload to S3 first.
+        # -------------------------------------------------
+        # Upload first
+        # -------------------------------------------------
         #
-        # If this operation fails, Python raises
-        # an exception and DynamoDB is NOT advanced.
-        s3_key = upload_to_s3(
+        # The watermark MUST NOT advance until
+        # the raw file has successfully reached S3.
+        # -------------------------------------------------
+
+        upload_to_s3(
             table_name,
             csv_content,
+            load_date,
         )
 
-        print(
-            f"Uploaded to "
-            f"s3://{S3_BUCKET}/{s3_key}"
-        )
+        # -------------------------------------------------
+        # Update watermark only after successful S3 upload
+        # -------------------------------------------------
 
-        # Advance the watermark only after
-        # the S3 upload succeeds.
         update_watermark(
             table_name,
             new_updated_at,
             new_id,
         )
 
+    print()
     print(
-        "\nPostgreSQL incremental ingestion completed."
+        "MySQL incremental ingestion completed."
     )
 
 
